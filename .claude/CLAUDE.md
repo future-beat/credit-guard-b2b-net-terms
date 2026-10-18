@@ -366,7 +366,7 @@ npm test          # 885 tests, 31 files
 
 **Recent repo hygiene (b8b8809, 2026-08-25):** `screenshots/` + `icon/` are now
 `listing/`; `.cursor/` and `.gemini/` MCP configs were removed (unused hosts);
-`LICENSE` is MIT for the code; the Credit Guard name, logo and listing assets are excluded.
+`LICENSE` is MIT for the code; the Credit Guard name, logo and listing assets are excluded (`TRADEMARKS.md`).
 
 ---
 

@@ -128,4 +128,4 @@ The runbook covers the rest:
 ## Licence
 
 Code: MIT, see [`LICENSE`](LICENSE). The Credit Guard name, logo and App Store
-listing assets are not covered by the licence and remain reserved.
+listing assets are not covered by the licence; see [`TRADEMARKS.md`](TRADEMARKS.md).
