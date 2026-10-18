@@ -1,0 +1,16 @@
+{
+  "cart": {
+    "cost": {
+      "totalAmount": {
+        "amount": "100.00",
+        "currencyCode": "USD"
+      }
+    },
+    "buyerIdentity": {
+      "purchasingCompany": null
+    }
+  },
+  "validation": {
+    "metafield": null
+  }
+}

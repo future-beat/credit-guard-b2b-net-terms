@@ -1,0 +1,10 @@
+# What `railway up` uploads from this directory (on top of .gitignore).
+# Mirrors .dockerignore so the upload is as small as the build context.
+.planning
+listing
+docs
+tests
+scripts
+site
+.claude
+*.mov

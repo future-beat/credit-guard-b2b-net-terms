@@ -1,0 +1,403 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
+// enough when changing adapters.
+// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+/// Per-store lifecycle record (FOUND-03, D-06).
+///
+/// `active` is the two-stage uninstall switch: `app/uninstalled` flips it false
+/// and stamps `uninstalledAt` while RETAINING every other row, so a re-install
+/// inside Shopify's 48h grace window restores the merchant's settings intact.
+/// Hard deletion happens only on `shop/redact`.
+model Shop {
+  id            String    @id @default(cuid())
+  domain        String    @unique
+  active        Boolean   @default(true)
+  installedAt   DateTime  @default(now())
+  uninstalledAt DateTime?
+  redactedAt    DateTime?
+
+  /// The shop's cart-and-checkout Validation object (ENFC-01/02), written ONLY
+  /// by ensureValidationRegistered. Its presence means "the deployed Function
+  /// is bound to this merchant's checkout"; null means the ensure-step has not
+  /// succeeded yet (pre-consent, or the merchant deleted the rule — the next
+  /// app-open recreates it). Never a cross-shop id: the row IS the tenant
+  /// (T-03-06), and the GID is only ever taken from that shop's own session.
+  ///
+  /// No cleanup path exists on purpose: uninstall revokes the token before any
+  /// validationDelete could run, and the Validation is app-owned so Shopify
+  /// removes it with the app (04-RESEARCH A8, FOUND-03 note).
+  validationGid String?
+
+  /// Reminder master switch AND suppression watermark (REMD-01, D5-02).
+  ///
+  /// NULL means reminders are OFF, and that is the default for every shop —
+  /// there is no install-day blast to suppress because the sweep returns
+  /// before it queries anything (reminders.server.ts rule 3). A merchant turns
+  /// reminders on in settings; the timestamp of that moment is then also the
+  /// watermark: a touchpoint whose threshold was already crossed BEFORE the
+  /// merchant opted in is logged SUPPRESSED_PREEXISTING and never sent, so
+  /// enabling the feature on a store with months of backfilled overdue
+  /// invoices dubs nobody (research Pitfall 1).
+  ///
+  /// Written ONLY by the settings action (Wave 3). No sweep, webhook or
+  /// backfill may set it: a code path that could enable reminders on the
+  /// merchant's behalf is the install blast wearing a different hat.
+  remindersEnabledAt DateTime?
+
+  /// Guided-setup step 1 acknowledgement (DASH-03, D6-03).
+  ///
+  /// Stamped ONCE by the home route's `mark-reviewed` intent when the merchant
+  /// presses "Looks right" on the imported balances, and never cleared — it is
+  /// a record that a human looked, not a piece of derived state. Keyed by the
+  /// session's shop domain only: no client-supplied shop ever reaches this
+  /// write (T-06-18). Steps 2 and 3 are deliberately NOT stored — they
+  /// re-derive from the ledger and from Shopify on every load, so they cannot
+  /// go stale the way a cached boolean would.
+  onboardingReviewedAt DateTime?
+
+  /// Guided-setup dismissal (DASH-03, BFS 4.2.2 #6).
+  ///
+  /// NULL means the "Set up Credit Guard" section is visible. Stamped ONCE by
+  /// the home route's `dismiss-onboarding` intent — which the server refuses
+  /// unless it re-derives 3 of 3 complete — and never cleared: there is no
+  /// re-open affordance by contract. Its second job is outage-proofing: while
+  /// it is null the home loader makes ONE Admin API read (the live validation
+  /// status behind step 3); once stamped the home page is a pure Postgres
+  /// projection again (T-06-22).
+  onboardingDismissedAt DateTime?
+
+  /// The one time we asked this merchant for an App Store review (LNCH-02).
+  ///
+  /// NULL means "never evaluated by Shopify yet". Stamped by the home route's
+  /// `review-prompt-result` intent for every outcome Shopify actually
+  /// evaluated — including a decline and including a thrown error — but NOT
+  /// for `recently-installed`, `already-open` or `open-in-progress`, under
+  /// which Shopify never looked at the request (B-01). Those three leave the
+  /// column null so a later load may ask once more; every other code closes
+  /// the question for good. Nagging is impossible either way: Shopify's own
+  /// limits are once per 60 days and three per year.
+  reviewPromptedAt DateTime?
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+/// Per-company AR ledger head (LEDG-02, D-01/D-03/D-07).
+///
+/// One row per Shopify Company per shop. `exposure` is never incremented — it is
+/// overwritten by a full recompute from the LedgerOrder rows (research killer
+/// bug #2: incremental balance arithmetic drifts). Amounts are store currency
+/// (D-07 `shopMoney`), keyed to the company via `Order.purchasingEntity` and
+/// never via the order's buyer contact (D-03).
+model Company {
+  id                 String    @id @default(cuid())
+  shop               String
+  companyGid         String
+  name               String
+  exposure           Decimal   @default(0) @db.Decimal(19, 4)
+  overdue            Boolean   @default(false)
+  earliestDueAt      DateTime?
+  recomputedAt       DateTime?
+  /// Merchant-set credit ceiling in store currency (CRED-01, D-02). NULL is the
+  /// observe-only default (CRED-04) — deliberately NO database default, because
+  /// null and 0.00 are different merchant decisions: null publishes
+  /// `limit: null` (no enforcement), 0.00 publishes `"0.00"` (block-all).
+  creditLimit        Decimal?  @db.Decimal(19, 4)
+  /// Per-company enforcement bypass (CRED-02, D-03). When true the published
+  /// credit_v1 payload carries `bypass: true` and Phase 4's Function lets the
+  /// checkout through regardless of limit/overdue.
+  bypassEnforcement  Boolean   @default(false)
+  /// sha256 of the last successfully published credit_v1 payload minus
+  /// computed_at (CRED-03). Hash-skip bookkeeping only — never enforcement
+  /// state. Written solely by publishCompanyCreditState (T-03-06: the row read
+  /// and the write are both keyed by this row's shop).
+  publishedStateHash String?
+  /// When credit_v1 was last successfully written to Shopify (CRED-03).
+  /// `publishedAt < recomputedAt` is the dirty marker the sweep backstop
+  /// retries; it advances only after a userErrors-free metafieldsSet.
+  publishedAt        DateTime?
+  /// Current enforcement state under P4-L1 (D4-03/ENFC-05): true iff
+  /// `bypassEnforcement == false AND creditLimit != null AND (overdue OR
+  /// exposure >= creditLimit)`.
+  ///
+  /// `recomputeCompany` is the SOLE writer (ledger.server.ts rule 3) — it
+  /// derives this in the same pass that writes exposure/overdue and emits the
+  /// BLOCK_STATE_ENTERED / BLOCK_STATE_EXITED EnforcementEvent on a change. No
+  /// route, sweep or webhook handler writes it directly: a second writer would
+  /// mean transitions the event log never saw (threat T-04-06). It records an
+  /// observation and is never read back by the publisher or the Function.
+  blockedState       Boolean   @default(false)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  orders LedgerOrder[]
+
+  @@unique([shop, companyGid])
+  @@index([shop, overdue])
+}
+
+/// Ledger-relevant cache of one Shopify order, refetched from source (LEDG-02).
+///
+/// Every column here is written from an authenticated `OrderForLedger` refetch —
+/// never from a webhook payload, which is only a doorbell (threat T-02-02).
+/// `companyId` null means the order has no purchasing company (D2C, or a draft
+/// with a plain buyer): the row is retained for visibility but contributes
+/// nothing to any company's exposure (research Pitfall 7).
+model LedgerOrder {
+  id                 String    @id @default(cuid())
+  shop               String
+  orderGid           String
+  name               String
+  companyId          String?
+  companyLocationGid String?
+  /// Order→company attribution state (02-06, WINDOWS defect 5). Allowed values
+  /// (enforced by code, not the database):
+  ///   ATTRIBUTED — company confirmed via the authenticated company→orders edge
+  ///   UNRESOLVED — cannot determine yet; the daily reconciliation will resolve
+  ///   NO_COMPANY — proven attached to no company. Set ONLY by reconciliation's
+  ///                exhaustion pass (02-08), never at webhook time.
+  attributionStatus  String    @default("UNRESOLVED")
+  hasPaymentTerms    Boolean
+  paymentTermsType   String?
+  financialStatus    String?
+  cancelledAt        DateTime?
+  /// totalOutstandingSet.shopMoney.amount — Shopify's own "balance due" (D-01/D-07)
+  outstandingShop    Decimal   @db.Decimal(19, 4)
+  currencyCode       String
+  /// Order.updatedAt at refetch time — feeds the reconciliation cursor (LEDG-04)
+  sourceUpdatedAt    DateTime
+  refetchedAt        DateTime
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  company   Company?         @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  schedules LedgerSchedule[]
+
+  @@unique([shop, orderGid])
+  @@index([shop, companyId])
+  @@index([shop, attributionStatus])
+}
+
+/// One payment schedule of a net-terms order (D-01, D-04, D-05).
+///
+/// Schedules supply the DUE-DATE and open/closed signal only: `completedAt ==
+/// null` is what makes an order count toward exposure. Their money columns are
+/// stored for the A1/A2 empirical checks and Phase 5 reminders but are NEVER
+/// summed — they are MoneyV2 of unspecified currency, and summing them across
+/// orders violates D-07 (research Pitfall 4).
+model LedgerSchedule {
+  id                 String    @id @default(cuid())
+  shop               String
+  scheduleGid        String
+  orderId            String
+  dueAt              DateTime?
+  completedAt        DateTime?
+  balanceDueAmount   Decimal?  @db.Decimal(19, 4)
+  balanceDueCurrency String?
+  createdAt          DateTime  @default(now())
+
+  order LedgerOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@unique([shop, scheduleGid])
+  @@index([shop, dueAt])
+}
+
+/// Webhook idempotency key (LEDG-02, threat T-02-03).
+///
+/// `id` IS the `X-Shopify-Webhook-Id` header value — a natural key, deliberately
+/// not a cuid, so the insert itself is the dedupe. Metadata only: Shopify
+/// delivers at-least-once, and storing the body would retain customer PII the
+/// app never needs (threat T-02-04).
+model WebhookReceipt {
+  id          String    @id
+  shop        String
+  topic       String
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+
+  @@index([shop])
+}
+
+/// Per-shop sweep bookmarks (LEDG-04) — e.g. the reconciliation `updated_at`
+/// cursor and backfill status. Generic key/value so later plans add keys without
+/// a migration.
+model SyncCursor {
+  id        String   @id @default(cuid())
+  shop      String
+  key       String
+  value     String
+  updatedAt DateTime @updatedAt
+
+  @@unique([shop, key])
+}
+
+/// Scheduler leadership lease (research Pitfall 6).
+///
+/// GLOBAL, not shop-keyed: it guards the single in-process scheduler against
+/// Railway's deploy-overlap window, so it is deliberately excluded from
+/// `redactShop`. Claimed with one atomic `UPDATE ... WHERE lockedUntil < now()`.
+model SweepLease {
+  name        String   @id
+  holder      String
+  lockedUntil DateTime
+}
+
+/// GDPR compliance receipt (FOUND-02, threats T-01-12 / T-01-13).
+///
+/// Receipt METADATA ONLY — deliberately no payload/body column. The webhook
+/// bodies carry customer identifiers, so storing them would turn the audit
+/// trail itself into retained PII. Shop + topic + timestamp is all the 30-day
+/// "request was actioned" evidence needs.
+model ComplianceRequest {
+  id         String   @id @default(cuid())
+  shop       String
+  topic      String
+  receivedAt DateTime @default(now())
+
+  @@index([shop])
+}
+
+/// Enforcement observability log (ENFC-05 as re-scoped by D4-03, ENFC-06).
+///
+/// Records WHAT ENFORCEMENT DID, never what it should do: nothing reads these
+/// rows back into a recompute, a publish, or the Function's input. That
+/// one-way direction is what lets the writes be best-effort (see
+/// `recordEnforcementEvent`) with no correctness consequence.
+///
+/// Per-checkout-attempt block logging is a platform impossibility — validation
+/// Function runs are not webhooked, and 2026-07 exposes no bypass trace — so
+/// the merchant-visible story is assembled from three observable moments:
+///   * BLOCK_STATE_ENTERED / BLOCK_STATE_EXITED — a company crossed the P4-L1
+///     line, written by `recomputeCompany` with the state snapshot;
+///   * BYPASS_ENABLED / BYPASS_DISABLED — the merchant flipped the toggle;
+///   * BYPASSED_ORDER — a net-terms order arrived that the Function would have
+///     stopped (ENFC-06: draft-order "ignore all checkout rules", POS, admin).
+///
+/// `companyGid` + `companyName` are SNAPSHOTS, deliberately with no foreign
+/// key: companies get deleted, and the history of an enforcement decision must
+/// outlive the company it was made about. Amounts are store currency (D-07).
+/// Field discipline matches credit_v1 (T-03-07 / T-04-08) — money and state
+/// only, never buyer contact data.
+model EnforcementEvent {
+  id          String   @id @default(cuid())
+  shop        String
+  companyGid  String
+  companyName String
+  /// One of the EVENT_KIND constants in enforcement.server.ts (P4-L3).
+  /// Validated by code, not the database — the same discipline as
+  /// LedgerOrder.attributionStatus.
+  kind        String
+  /// Set only on BYPASSED_ORDER; NULL on every state/audit row.
+  orderGid    String?
+  /// The leaked order's outstanding balance at attribution time.
+  amount      Decimal? @db.Decimal(19, 4)
+  /// Order.sourceName — `shopify_draft_order`, `pos`, `web`, … A `web` channel
+  /// on a BYPASSED_ORDER means the validation itself was off or failed.
+  channel     String?
+  exposure    Decimal  @db.Decimal(19, 4)
+  /// NULL means the company was observe-only at the time (CRED-04).
+  limit       Decimal? @db.Decimal(19, 4)
+  overdue     Boolean
+  bypass      Boolean
+  createdAt   DateTime @default(now())
+
+  /// The leak dedupe (ENFC-06): one BYPASSED_ORDER per order, whatever a
+  /// webhook redelivery or a reconciliation refetch tries. Postgres treats
+  /// NULLs as distinct in a unique index, so the NULL-orderGid transition and
+  /// audit rows never collide with each other.
+  @@unique([shop, kind, orderGid])
+  @@index([shop, createdAt])
+}
+
+/// One row per (schedule x touchpoint) reminder attempt — the REMD-01 email log.
+///
+/// THE UNIQUE CONSTRAINT IS THE IDEMPOTENCE. Exactly like `WebhookReceipt`,
+/// where "the insert itself is the dedupe": the sweep INSERTs this row with
+/// status SENDING *before* it asks Shopify to send anything, and a P2002 unique
+/// violation means some other pass — a concurrent container, or this container
+/// before it crashed — already owns that touchpoint, so the second attempt
+/// stops silently. Claim-then-send is deliberately at-MOST-once: crashing after
+/// the claim and before the send drops one reminder (harmless, the next
+/// touchpoint still fires), whereas send-then-log double-emails a real buyer,
+/// which is the trust-destroying direction (research Pattern 2 / Pitfall 3).
+///
+/// `orderGid`, `companyGid` and `companyName` are SNAPSHOTS with no foreign key
+/// (EnforcementEvent precedent): the history of a reminder must outlive the
+/// order and company it was about. Field discipline matches credit_v1 and
+/// EnforcementEvent (T-03-07 / T-05-04) — identifiers, moment and status only.
+/// NEVER a buyer email, name or any other contact field: under D5-01 Shopify
+/// resolves the recipient and sends the mail, and no customer personal data
+/// enters this app at all.
+model ReminderLog {
+  id          String    @id @default(cuid())
+  shop        String
+  /// `LedgerSchedule.scheduleGid` — the ONLY value the app hands Shopify.
+  scheduleGid String
+  orderGid    String
+  companyGid  String?
+  companyName String?
+  /// DUE_SOON | DUE | OVERDUE — the moment this row claims. Validated by code
+  /// (reminders.server.ts TOUCHPOINT), not by the database, the same discipline
+  /// as LedgerOrder.attributionStatus and EnforcementEvent.kind.
+  touchpoint  String
+  /// SENDING | SENT | SENT_UNCONFIRMED | FAILED | DEAD | SUPPRESSED_PAID |
+  /// SUPPRESSED_STALE | SUPPRESSED_PREEXISTING | DEFERRED — see the
+  /// REMINDER_STATUS constants. SENDING is the claim; FAILED and DEFERRED are
+  /// retriable; every other value is terminal. SENT_UNCONFIRMED means the
+  /// mutation was issued and the answer never arrived, so Shopify may have
+  /// delivered it — it is never retried, because re-sending an ambiguous
+  /// reminder is the double-dun this whole design exists to prevent (F-01).
+  status      String
+  /// Send attempts made against Shopify. Bounded retry of FAILED rows lands in
+  /// 05-03; the column exists from the first migration so no later backfill is
+  /// needed.
+  attempts    Int       @default(0)
+  /// Stamped with the SWEEP'S injected `now` when a send was issued and not
+  /// refused — for SENT, and for SENT_UNCONFIRMED where delivery is unknowable.
+  /// The per-order 24h guard reads this column, so it must reflect sweep time
+  /// rather than wall-clock write time.
+  sentAt      DateTime?
+  /// Why the last attempt did not send: RATE_LIMITED | REFUSED | TRANSPORT |
+  /// REFETCH. A code-enforced token from the FAILURE_REASON constants, NEVER a
+  /// raw Shopify message — a message could carry order or buyer detail into a
+  /// column this app promises holds no customer personal data.
+  failureReason String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  /// The claim (research Pattern 2). One row per moment per schedule per shop.
+  @@unique([shop, scheduleGid, touchpoint])
+  /// Phase-6 dashboard feed and LNCH-02's "first reminder sent" query.
+  @@index([shop, createdAt])
+}

@@ -1,0 +1,32 @@
+{
+  "cart": {
+    "cost": {
+      "totalAmount": {
+        "amount": "100.00",
+        "currencyCode": "EUR"
+      }
+    },
+    "buyerIdentity": {
+      "purchasingCompany": {
+        "company": {
+          "id": "gid://shopify/Company/1",
+          "metafield": {
+            "jsonValue": {
+              "v": 1,
+              "limit": "1500.00",
+              "exposure": "1874.95",
+              "currency": "USD",
+              "overdue": false,
+              "bypass": false,
+              "data_complete": true,
+              "computed_at": "2026-08-19T22:10:00.000Z"
+            }
+          }
+        }
+      }
+    }
+  },
+  "validation": {
+    "metafield": null
+  }
+}

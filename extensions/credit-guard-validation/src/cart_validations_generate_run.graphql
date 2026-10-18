@@ -1,0 +1,41 @@
+# Input query for target `cart.validations.generate.run` (API 2026-07).
+#
+# Shape follows Shopify/example-checkout--validation--preact; every field name
+# is validated against this workspace's schema.graphql by `npm run typegen`.
+#
+# `metafield(key: "credit_v1")` OMITS the namespace argument on purpose. The
+# function schema documents `Company.metafield(namespace: String)` as: "If
+# omitted, then the app-reserved namespace is used." This function ships in the
+# same app that writes credit_v1 under `$app`, so the omitted form reads exactly
+# our metafield (04-RESEARCH Q2). Do NOT "fix" this by adding a namespace — the
+# documented fallback, if the live replay ever shows null, is the literal
+# `namespace: "$app"`, and that is gated by EC-2 in plan 04-05.
+#
+# `presentmentCurrencyRate` is deliberately NOT queried: D4-02 is skip-on-
+# mismatch, never convert. Querying it would invite a float division into the
+# comparator.
+query CartValidationsGenerateRunInput {
+  cart {
+    cost {
+      totalAmount {
+        amount
+        currencyCode
+      }
+    }
+    buyerIdentity {
+      purchasingCompany {
+        company {
+          id
+          metafield(key: "credit_v1") {
+            jsonValue
+          }
+        }
+      }
+    }
+  }
+  validation {
+    metafield(key: "config_v1") {
+      jsonValue
+    }
+  }
+}

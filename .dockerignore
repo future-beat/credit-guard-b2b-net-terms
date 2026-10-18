@@ -1,0 +1,27 @@
+# Docker build context = what `COPY . .` in the Dockerfile puts in the image.
+# The runtime needs: package.json + lockfile, app/, prisma/, public/, PRIVACY.md
+# (inlined at build via ?raw), instrument.server.mjs, and the RR/Vite/TS configs.
+# Everything below is either regenerable, developer-only, or not the app.
+
+node_modules
+.cache
+build
+/app/types
+.react-router
+.shopify
+.git
+.claude
+.env
+.env.*
+.DS_Store
+
+# Project record, listing assets, tests, probes, docs, marketing — not the app
+.planning
+listing
+docs
+tests
+scripts
+site
+*.md
+!PRIVACY.md
+*.mov

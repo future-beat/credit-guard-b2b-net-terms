@@ -1,0 +1,27 @@
+# Pinned to the latest STABLE version, in lockstep with shopify.app.toml's
+# [webhooks] api_version and the Admin API version the app code targets. A
+# function + admin + webhook version skew is how `purchasingCompany` field drift
+# gets in. 2026-10 is a release candidate: the Shopify CLI will try to rewrite
+# this pin to the RC on dev/deploy — re-pin it if that happens (same convention,
+# same reason, as the note in shopify.app.toml).
+api_version = "2026-07"
+
+[[extensions]]
+name = "t:name"
+handle = "credit-guard-validation"
+type = "function"
+uid = "b1fea931-0003-8761-9fa6-7d9817cfb41b85a90b4b"
+description = "t:description"
+
+  # 2026-07 target. Pre-2025-10 tutorials show `purchase.validation.run` with a
+  # flat `errors` array of `localizedMessage` — that era is dead; see the result
+  # type in generated/api.ts. `export` is the WebAssembly export name
+  # function-runner and the platform invoke (kebab-case here, camelCase in TS).
+  [[extensions.targeting]]
+  target = "cart.validations.generate.run"
+  input_query = "src/cart_validations_generate_run.graphql"
+  export = "cart-validations-generate-run"
+
+  [extensions.build]
+  command = ""
+  path = "dist/function.wasm"

@@ -1,0 +1,162 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "e3646af7354722605befddb124e52439"
+name = "Credit Guard: B2B Net Terms"
+handle = "credit-guard-net-terms"
+embedded = true
+application_url = "https://app.creditguardhq.com"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+#
+# CF-1 decision (Phase 2, 02-RESEARCH § Scopes) plus the single Phase-3 write
+# scope. No scope is requested until a phase actually needs it:
+#   read_orders        orders + the orders/* and refunds/create webhooks
+#   read_all_orders    removes Shopify's default 60-day order window. NON-
+#                      NEGOTIABLE for D-06 (backfill every open net-terms order
+#                      regardless of age). Without it Shopify silently returns
+#                      only recent orders — no error, just an understated
+#                      exposure, which is the direction that lets an over-limit
+#                      buyer through. Needs a Partner Dashboard access request
+#                      for PRODUCTION stores (~7 business days); development
+#                      stores are exempt.
+#   read_payment_terms PaymentTerms/PaymentSchedule + payment_terms/*,
+#                      payment_schedules/due
+#   read_companies     Company/CompanyLocation + companies/*. Deliberately
+#                      narrower than read_customers, which would pull in all
+#                      customer PII for no benefit.
+#   write_companies    metafieldsSet on Company requires the owner-type WRITE
+#                      scope — no metafield-specific scope exists, and the $app
+#                      namespace changes who else may touch the metafield, not
+#                      what scope the owning app needs. Added Phase 3 for
+#                      CRED-03 (publish the credit_v1 credit-state metafield);
+#                      also covers the metafieldDefinitionCreate fallback (A1).
+#   write_validations  validationCreate/validationUpdate require it (04-RESEARCH
+#                      Q6). Added Phase 4 for ENFC-01/ENFC-02: the app registers
+#                      its own cart-and-checkout Validation object so merchants
+#                      never have to hunt through Settings -> Checkout ->
+#                      Checkout rules to arm enforcement. It is also what lets
+#                      the app pin blockOnFailure = false (ENFC-04) rather than
+#                      inherit whatever a hand-made rule defaults to. Assumed to
+#                      imply the matching read of Query.validations per
+#                      Shopify's write-implies-read convention (04-RESEARCH A4);
+#                      04-05 EC-4 proves or disproves that live.
+#   write_orders       paymentReminderSend requires it (live 2026-07 docs).
+#                      Added Phase 5 for REMD-01/REMD-03: it is used for
+#                      EXACTLY ONE call — asking Shopify to send its own
+#                      "Payment reminder" notification for a payment schedule
+#                      the app already tracks. The app never creates, edits,
+#                      cancels or refunds an order, and holds no buyer contact
+#                      data: under D5-01 Shopify resolves the recipient and
+#                      sends from the merchant's authenticated sender.
+#                      read_orders stays in the string above even though write
+#                      conventionally implies read — 04-RESEARCH A4 proved the
+#                      convention, and explicitness is the CF-1 posture.
+#
+# Keep this string in lockstep with the Railway SCOPES variable and the test env
+# in vitest.config.ts — app/shopify.server.ts reads process.env.SCOPES, so a TOML
+# change alone does not change what the running app requests. Two suites guard
+# the two homes a test can reach: tests/scope-lockstep.test.ts and
+# tests/webhooks.b2b-events.test.ts.
+scopes = "read_orders,read_all_orders,read_payment_terms,read_companies,write_companies,write_validations,write_orders"
+
+# App-owned Company credit contract (Phase 3, D-04). $app namespace, key
+# credit_v1 — THE server<->Function interface. The payload law lives in the
+# app/services/metafields.server.ts header; breaking changes ship as a new
+# credit_v2 key published alongside, never a rename or in-place mutation.
+# Assumption A1 (03-RESEARCH): the `company` owner-type token below is
+# deploy-validated (plan 03-02 Task 2). If deploy validation rejects it, the
+# fallback is a one-off metafieldDefinitionCreate (ownerType COMPANY,
+# namespace "$app", key "credit_v1", type "json") — schema-verified.
+[company.metafields.app.credit_v1]
+name = "Credit Guard credit state"
+description = "Machine-read credit state published by Credit Guard. Do not edit."
+type = "json"
+access.admin = "merchant_read"
+
+[webhooks]
+# Pinned to the latest STABLE version (project decision). 2026-10 is a release
+# candidate — unsupported and may carry breaking changes. The Shopify CLI will
+# try to rewrite this to the RC on link/dev; re-pin it if that happens.
+api_version = "2026-07"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = [ "app/uninstalled" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/scopes_update"
+  topics = [ "app/scopes_update" ]
+
+  # ---------------------------------------------------------------------------
+  # Phase 2 AR-ledger ingest (LEDG-01/02). Fifteen topics across four routes.
+  #
+  # Every order-shaped topic funnels into ONE handler that refetches the order
+  # from the Admin API and recomputes from source. That is why the set is wide
+  # and the routes are few: Shopify coalesces related deliveries (~15s window),
+  # so orders/paid may never arrive on its own, and no ledger behaviour may
+  # depend on which topic name showed up.
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/orders"
+  topics = [
+    "orders/create",
+    "orders/updated",
+    "orders/paid",
+    "orders/edited",
+    "orders/cancelled",
+    "orders/delete",
+    "refunds/create"
+  ]
+
+  # Due-date edits may move a company's overdue state without moving money, and
+  # orders/updated is not guaranteed to fire for them.
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/payment-terms"
+  topics = [
+    "payment_terms/create",
+    "payment_terms/update",
+    "payment_terms/delete",
+    "payment_schedules/due"
+  ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/companies"
+  topics = [ "companies/create", "companies/update", "companies/delete" ]
+
+  # A NO-OP since 02-07, kept registered deliberately. The install backfill is
+  # company-driven and synchronous (~1s) — it submits no bulk operation, so a
+  # finish delivery has nothing to advance. The topic stays because dropping it
+  # would force a registration deploy for zero gain, and app/routes/
+  # webhooks.bulk-operations.tsx must therefore keep answering it (T-02-29).
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/bulk-operations"
+  topics = [ "bulk_operations/finish" ]
+
+  # Mandatory GDPR compliance topics (FOUND-02). The template ships this block
+  # commented out because compliance topics are public-apps-only; app review
+  # blocks without it. `compliance_topics` is a separate key from `topics` and
+  # the two must not be mixed in one subscription.
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/compliance"
+  compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
+
+[auth]
+# Same origin as application_url. The three paths are the set the Shopify CLI
+# writes for this template, kept verbatim so a later `dev`/`deploy` produces no
+# diff here. Only /auth/callback is routed (authPathPrefix "/auth" + auth.$.tsx);
+# the other two are legacy fallbacks that 404 harmlessly if never used.
+redirect_urls = [
+  "https://app.creditguardhq.com/auth/callback",
+  "https://app.creditguardhq.com/auth/shopify/callback",
+  "https://app.creditguardhq.com/api/auth/callback"
+]
+
+[build]
+# MUST stay false now that application_url points at production (D-04).
+# With it true, `shopify app dev` silently rewrites application_url here to the
+# ephemeral tunnel URL. Every `shopify app deploy` now ships this file's config
+# unconditionally (the CLI removed `include_config_on_deploy` on 2026-08-18 —
+# including config is no longer opt-in), so a stale tunnel URL left in this file
+# would be published to the live registration and break install + OAuth for real
+# merchants. Local dev prompts for the URL swap instead of doing it silently.
+automatically_update_urls_on_dev = false
